@@ -47,6 +47,12 @@ from .oauth import (
     read_auth_token,
 )
 from .registry import set_active_adapter
+from .media import (
+    activity_content_from_payload,
+    capture_prompt_payload,
+    download_media,
+    extract_media_references,
+)
 from .webhook import (
     SUPPORTED_ACTIONS,
     LinearWebhookContext,
@@ -1007,8 +1013,11 @@ class LinearAgentAdapter(BasePlatformAdapter):
             else build_update_prompt(context)
         )
 
+        capture_prompt_payload(payload, action=context.action, session_id=context.agent_session_id)
+        media_files = await self._prompt_media_files(payload)
+
         try:
-            await self._dispatch_linear_message(context, message, payload, profile=profile)
+            await self._dispatch_linear_message(context, message, payload, profile=profile, media=media_files)
         except Exception as exc:  # noqa: BLE001 - send an Agent Activity error when possible
             logger.exception("[linear_agent] Dispatch failed for session %s", context.agent_session_id)
             await self.send_error_activity(
@@ -1321,6 +1330,30 @@ class LinearAgentAdapter(BasePlatformAdapter):
             "agent_session_id": session_id,
         }, 200
 
+    async def _prompt_media_files(self, payload: dict[str, Any]) -> list[tuple[str, str]]:
+        """Cache screenshots/files Linear attached to this prompt.
+
+        AgentActivityPromptContent carries only ``body`` and ``bodyData``, so an
+        attachment reaches the connector as a rich node rather than a file. Without
+        this, the agent is told nothing about the attachment and reports that it
+        cannot open it. Failures are logged and skipped, never fatal to the turn.
+        """
+        body, body_data = activity_content_from_payload(payload)
+        references = extract_media_references(body, body_data)
+        if not references:
+            return []
+        logger.info(
+            "[linear_agent] Prompt references %d attachment(s): %s",
+            len(references),
+            ", ".join(ref.name or ref.url for ref in references[:5]),
+        )
+        token = ""
+        try:
+            token = str(getattr(self, "_access_token", "") or "")
+        except Exception:  # noqa: BLE001 - token is best-effort for Linear-hosted assets
+            token = ""
+        return await download_media(references, access_token=token)
+
     async def _dispatch_linear_message(
         self,
         context: LinearWebhookContext,
@@ -1328,8 +1361,10 @@ class LinearAgentAdapter(BasePlatformAdapter):
         payload: dict[str, Any],
         *,
         profile: str | None = None,
+        media: list[tuple[str, str]] | None = None,
     ) -> None:
         source = self._build_source(context, profile=profile)
+        cached = list(media or [])
         event = MessageEvent(
             text=message,
             message_type=MessageType.TEXT,
@@ -1340,6 +1375,11 @@ class LinearAgentAdapter(BasePlatformAdapter):
             },
             message_id=context.delivery_id,
             auto_skill=list(self._auto_skills) if self._auto_skills else None,
+            # Cached attachment paths feed the gateway's vision path; media_types
+            # decides which of them are treated as images.
+            media_urls=[path for path, _ in cached],
+            media_types=[mime for _, mime in cached],
+            media_text_inlined=[False for _ in cached],
         )
 
         # The linear_agent toolset reaches sessions through the gateway's
