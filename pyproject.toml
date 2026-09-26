@@ -7,7 +7,7 @@ name = "hermes-linear-agent"
 version = "0.4.2"
 description = "Linear Agent Session platform and attributed Linear tools for Hermes Agent"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ritchie" }]
